@@ -179,7 +179,7 @@ def main():
     outdir = '{}/imgs'.format(args.dir)
     if not os.path.exists(outdir):
         os.makedirs(outdir)
-    sample(model, valloader, outdir, u_config)
+    sample(model, valloader, outdir, c_config)
 
     # # Load the best model and evaluate on test set
     # checkpoint = torch.load('exp/%s/' %
@@ -265,28 +265,28 @@ def Validate(validateloader, model, epoch):
     return losses.avg
 
 
-def sample(model, dataloader, outdir, unet_config):
+def sample(model, dataloader, outdir, c_config):
     """Visualize some predicted masks on training data to get a better intuition
        about the performance.
     """
     datailer = iter(dataloader)
     img, classification, bound = datailer.next()
     torchvision.utils.save_image(img, '{0}/raw.png'.format(outdir))
-    for i in range(unet_config.num_offsets):
+    for i in range(len(c_config.offsets)):
         torchvision.utils.save_image(
             bound[:, i:i + 1, :, :], '{0}/bound_{1}.png'.format(outdir, i))
-    for i in range(unet_config.num_classes):
+    for i in range(c_config.num_classes):
         torchvision.utils.save_image(
             classification[:, i:i + 1, :, :], '{0}/class_{1}.png'.format(outdir, i))
     img = torch.autograd.Variable(img).cuda()
     predictions = model(img)
     predictions = predictions.data
-    class_pred = predictions[:, :unet_config.num_classes, :, :]
-    bound_pred = predictions[:, unet_config.num_classes:, :, :]
-    for i in range(unet_config.num_offsets):
+    class_pred = predictions[:, :c_config.num_classes, :, :]
+    bound_pred = predictions[:, c_config.num_classes:, :, :]
+    for i in range(len(c_config.offsets)):
         torchvision.utils.save_image(
             bound_pred[:, i:i + 1, :, :], '{0}/bound_pred{1}.png'.format(outdir, i))
-    for i in range(unet_config.num_classes):
+    for i in range(c_config.num_classes):
         torchvision.utils.save_image(
             class_pred[:, i:i + 1, :, :], '{0}/class_pred{1}.png'.format(outdir, i))
 

@@ -17,6 +17,8 @@ import numpy as np
 import warnings
 import resource
 import scipy.misc
+from waldo.data_visualization import visualize_mask
+from waldo.core_config import CoreConfig
 
 class ObjPair:
     """
@@ -49,9 +51,9 @@ class Object:
     Attributes:
         object_class:    A record of the current assigned class (an integer)
         pixels:    A set of pixels (2-tuples) that are part of the object
-        class_log_probs:    An array indexed by class, of the total (over all pixels
-               in this object) of the log-prob of assigning this pixel to this class;
-               the object_class corresponds to the index of the max element of this.
+        class_logprobs:    An array indexed by class, of the total (over all pixels
+                in this object) of the log-prob of assigning this pixel to this class;
+                the object_class corresponds to the index of the max element of this.
         adjacency_list:   A list of adjacency records, recording other objects to which
                 this object is adjacent.  ('Adjacent' means "linked by an offset", not
                 adjacency in the normal sense). It's actually a map (from obj
@@ -64,6 +66,7 @@ class Object:
         self.object_class = np.argmax(self.class_logprobs)
         self.adjacency_list = {}
         self.id = id
+        self.sameness_logprob = 0
 
     def compute_class_logprobs(self, segmenter):
         self.class_logprobs = np.zeros(segmenter.num_classes)
@@ -81,6 +84,15 @@ class Object:
         print("")
         print("Pixel list: {}".format(self.pixels))
 
+    def compute_sameness_logprob(self, segmenter):
+        """ This is only used for debugging purposes. """
+        self.sameness_logprob = 0
+        for o, i in zip(segmenter.offsets, range(len(segmenter.offsets))):
+            for p1 in self.pixels:
+                p2 = (p1[0] + o[0], p1[1] + o[1])
+                if p2 in self.pixels:
+                    same_prob = segmenter.get_sameness_prob(p1, i)
+                    self.sameness_logprob += np.log(same_prob)
 
     def __hash__(self):
         return hash(self.id)
@@ -151,22 +163,28 @@ class AdjacencyRecord:
 
     def compute_obj_merge_logprob(self, segmenter):
         logprob = 0
+        adjacent = False
         self.differentness_logprob = 0
+        self.sameness_logprob = 0
         for o, i in zip(segmenter.offsets, range(len(segmenter.offsets))):
             for p1 in self.obj1.pixels:
                 p2 = (p1[0] + o[0], p1[1] + o[1])
                 if p2 in self.obj2.pixels:
+                    adjacent = True
                     same_prob = segmenter.get_sameness_prob(p1, i)
                     self.differentness_logprob += np.log(1.0 - same_prob)
+                    self.sameness_logprob += np.log(same_prob)
                     logprob += np.log(same_prob) - np.log(1.0 - same_prob)
 
             for p1 in self.obj2.pixels:
                 p2 = (p1[0] + o[0], p1[1] + o[1])
                 if p2 in self.obj1.pixels:
+                    adjacent = True
                     same_prob = segmenter.get_sameness_prob(p1, i)
                     self.differentness_logprob += np.log(1.0 - same_prob)
+                    self.sameness_logprob += np.log(same_prob)
                     logprob += np.log(same_prob) - np.log(1.0 - same_prob)
-        self.obj_merge_logprob = logprob
+        self.obj_merge_logprob = logprob if adjacent else None
 
 
     def compute_class_delta_logprob(self):
@@ -233,7 +251,7 @@ class ObjectSegmenter:
         obj_id = 0
         for row in range(self.img_height):
             for col in range(self.img_width):
-                pixels = [(row, col)]
+                pixels = set([(row, col)])
                 obj = Object(pixels, obj_id, self)
                 self.objects[obj_id] = obj
                 self.pixel2obj[(row, col)] = obj
@@ -262,7 +280,7 @@ class ObjectSegmenter:
         return self.sameness_probs[offset_index, pixel[0], pixel[1]]
 
     def show_stats(self):
-        print("Total logprob (not incl. sameness inside objects): "
+        print("Total logprob: "
               "{:.3f}".format(self.compute_total_logprob()))
         print("Total number of objects: {}".format(len(self.objects)))
         print("Total number of adjacency records: "
@@ -278,20 +296,26 @@ class ObjectSegmenter:
     def compute_total_logprob(self):
         tot_class_logprob = 0
         tot_differentness_logprob = 0
+        tot_sameness_logprob = 0
         for obj in self.objects.values():
             tot_class_logprob += obj.class_logprob()
+            tot_sameness_logprob += obj.sameness_logprob
         for arec in self.adjacency_records.values():
             tot_differentness_logprob += arec.differentness_logprob
-        return tot_class_logprob + tot_differentness_logprob
+        return tot_class_logprob + tot_differentness_logprob + tot_sameness_logprob
 
 
     def visualize(self, iter):
+        c = CoreConfig()
+        c.offsets = [(0,1), (1,0)]
+        c.train_image_size = self.img_height
+
         img = np.zeros((self.img_height, self.img_width))
         k = 1
         for obj in self.objects.values():
             for p in obj.pixels:
                 img[p] = k
-            center = tuple(np.array(obj.pixels).mean(axis=0))
+            center = tuple(np.array(list(obj.pixels)).mean(axis=0))
             img[int(center[0]), int(center[1])] = 0.0
             k += 1
         scipy.misc.imsave('{}.png'.format(iter), img)
@@ -362,10 +386,10 @@ class ObjectSegmenter:
         """
         print("Starting segmentation...")
         n = 0
-        N = 500000  # max iters -- for experimentation
-        target_objs = 4  # for experimentation
+        N = 1000000  # max iters -- for experimentation
+        target_objs = 0  # for experimentation
         self.verbose = 0
-        self.do_debugging = True
+        self.do_debugging = False
         while self.queue:
             if len(self.objects) <= target_objs:
                 print("Target objects reached: {}".format(target_objs))
@@ -451,10 +475,23 @@ class ObjectSegmenter:
         if len(obj2.pixels) > len(obj1.pixels):
             obj1, obj2 = obj2, obj1
 
+        assert np.abs(arec.obj_merge_logprob - (arec.sameness_logprob - arec.differentness_logprob)) < 0.001
+
+        if self.do_debugging:
+            old_logprob = arec.obj_merge_logprob
+            arec.compute_obj_merge_logprob(self)
+            if np.abs(arec.obj_merge_logprob - old_logprob) > 0.001:
+                print("Error: object merge logprob changed unexpectedly. "
+                      "{}  !=  {}".format(arec.obj_merge_logprob, old_logprob))
+                arec.print()
+                sys.exit(1)
+
         # now we are sure that obj1 has equal/more pixels
         obj1.object_class = arec.merged_class
-        obj1.pixels += obj2.pixels
+        obj1.pixels = obj1.pixels.union(obj2.pixels)
         obj1.class_logprobs += obj2.class_logprobs
+        obj1.sameness_logprob += arec.sameness_logprob + obj2.sameness_logprob
+
         del self.adjacency_records[arec.obj_pair()]
         del obj1.adjacency_list[arec.obj_pair()]
         del obj2.adjacency_list[arec.obj_pair()]
@@ -477,6 +514,9 @@ class ObjectSegmenter:
                 that_arec = obj1.adjacency_list[this_arec.obj_pair()]
                 that_arec.obj_merge_logprob += this_arec.obj_merge_logprob
                 that_arec.differentness_logprob += this_arec.differentness_logprob
+                that_arec.sameness_logprob += this_arec.sameness_logprob
+                this_arec.merge_priority = -1.0  # make sure it is practically deleted from the queue
+                self.adjacency_records[that_arec.obj_pair()] = that_arec
                 obj3.adjacency_list[that_arec.obj_pair()] = that_arec
                 that_arec.update_merge_priority()
                 if that_arec.merge_priority >= 0:
